@@ -1,5 +1,6 @@
 import { app } from "../../../scripts/app.js";
 import { ComfyWidgets } from "../../../scripts/widgets.js";
+import { api } from "../../../scripts/api.js";
 
 // Three.js and addons from local lib folder
 import * as THREE from './lib/three.module.js';
@@ -159,14 +160,105 @@ app.registerExtension({
                 promptStack.style.overflowY = 'auto';
                 promptStack.style.flex = '1';
 
+                const wireframeControls = document.createElement('div');
+                wireframeControls.style.position = 'absolute';
+                wireframeControls.style.bottom = '10px';
+                wireframeControls.style.right = '10px';
+                wireframeControls.style.zIndex = '100';
+                wireframeControls.style.background = 'rgba(0,0,0,0.6)';
+                wireframeControls.style.padding = '5px';
+                wireframeControls.style.borderRadius = '4px';
+                wireframeControls.style.display = 'flex';
+                wireframeControls.style.alignItems = 'center';
+                wireframeControls.style.gap = '5px';
+                wireframeControls.style.color = 'white';
+                wireframeControls.style.fontSize = '12px';
+                wireframeControls.style.background = 'rgba(0,0,0,0.5)';
+                wireframeControls.style.padding = '5px';
+                wireframeControls.style.borderRadius = '4px';
+
+                const toggleWireframe = document.createElement('input');
+                toggleWireframe.type = 'checkbox';
+                // Avoid global IDs, use scoped variable
+                toggleWireframe.checked = true;
+
+                const wireframeLabel = document.createElement('label');
+                wireframeLabel.innerText = 'Show Topology';
+                wireframeLabel.style.cursor = 'pointer';
+                wireframeLabel.style.flex = '1';
+                
+                // Allow label to toggle checkbox
+                wireframeLabel.addEventListener('click', () => {
+                    toggleWireframe.checked = !toggleWireframe.checked;
+                    toggleWireframe.dispatchEvent(new Event('change'));
+                });
+
+                const wireframeColor = document.createElement('input');
+                wireframeColor.type = 'color';
+                wireframeColor.value = '#00ff00';
+                wireframeColor.style.height = '20px';
+                wireframeColor.style.width = '24px';
+                wireframeColor.style.padding = '0';
+                wireframeColor.style.border = 'none';
+                wireframeColor.style.cursor = 'pointer';
+
+                wireframeControls.appendChild(toggleWireframe);
+                wireframeControls.appendChild(wireframeLabel);
+                wireframeControls.appendChild(wireframeColor);
+
+                const toggleMasks = document.createElement('input');
+                toggleMasks.type = 'checkbox';
+                toggleMasks.checked = true;
+                toggleMasks.style.marginLeft = '10px';
+
+                const masksLabel = document.createElement('label');
+                masksLabel.innerText = 'Show Masks';
+                masksLabel.style.cursor = 'pointer';
+                
+                masksLabel.addEventListener('click', () => {
+                    toggleMasks.checked = !toggleMasks.checked;
+                    toggleMasks.dispatchEvent(new Event('change'));
+                });
+
+                toggleMasks.addEventListener('change', () => {
+                    redrawMasks();
+                });
+
+                wireframeControls.appendChild(toggleMasks);
+                wireframeControls.appendChild(masksLabel);
+
+                // Move wireframe UI directly over the Three.js viewport
+                leftPane.appendChild(wireframeControls);
+
                 promptStackContainer.appendChild(newLayerBtn);
                 promptStackContainer.appendChild(promptStack);
                 rightPane.appendChild(promptStackContainer);
+
+                toggleWireframe.addEventListener('change', (e) => {
+                    if (currentMesh) {
+                        currentMesh.traverse((child) => {
+                            if (child.isMesh && child.userData.wireframeHelper) {
+                                child.userData.wireframeHelper.visible = e.target.checked;
+                            }
+                        });
+                    }
+                });
+
+                wireframeColor.addEventListener('input', (e) => {
+                    if (currentMesh) {
+                        currentMesh.traverse((child) => {
+                            if (child.isMesh && child.userData.wireframeHelper) {
+                                child.userData.wireframeHelper.material.color.set(e.target.value);
+                            }
+                        });
+                    }
+                });
 
                 let layerCount = 0;
                 let activeLayerId = null;
                 const maskState = {};
                 let currentMesh = null;
+                let lastGeneratedImage = null;
 
                 function buildUVMap(mesh) {
                     const geometry = mesh.geometry;
@@ -307,7 +399,9 @@ app.registerExtension({
 
                         layers.push({
                             prompt: layer.prompt,
-                            mask: hiddenCanvas.toDataURL("image/png")
+                            name: layer.inputRow.querySelectorAll('input[type="text"]')[0].value,
+                            mask: hiddenCanvas.toDataURL("image/png"),
+                            faces: layer.faces
                         });
                     });
 
@@ -510,11 +604,7 @@ app.registerExtension({
                             });
                         }
 
-                        // Full state reset
-                        Object.keys(maskState).forEach(key => delete maskState[key]);
-                        promptStack.innerHTML = '';
-                        layerCount = 0;
-                        activeLayerId = null;
+                        // Do not hard reset maskState here to allow hydrated persistence to survive reloading the obj file.
                         
                         if (activeHighlightMesh) {
                             scene.remove(activeHighlightMesh);
@@ -545,9 +635,14 @@ app.registerExtension({
 
                                 // Add wireframe
                                 const wireframeGeometry = new THREE.WireframeGeometry(child.geometry);
-                                const wireframeMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
+                                const wireframeMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00, depthTest: false, opacity: 0.5, transparent: true });
                                 const wireframe = new THREE.LineSegments(wireframeGeometry, wireframeMaterial);
                                 child.add(wireframe);
+                                child.userData.wireframeHelper = wireframe;
+                                
+                                // Sync initial state with UI
+                                wireframe.visible = toggleWireframe.checked;
+                                wireframeMaterial.color.set(wireframeColor.value);
 
                                 // Build per-mesh UV maps
                                 if (!child.userData.uvMapBuilt) {
@@ -635,6 +730,8 @@ app.registerExtension({
                 renderer.domElement.addEventListener('mouseleave', () => handleHover(null));
 
                 function handleFaceClick(hit) {
+                    if (!hit || !hit.object || !hit.object.userData) return;
+                    
                     const isIslandMode = islandRadio.checked;
                     const startFaceIndex = hit.faceIndex;
 
@@ -645,6 +742,7 @@ app.registerExtension({
 
                     let facesToProcess = [startFaceIndex];
                     if (isIslandMode) {
+                        if (!hit.object.userData.faceToIslandId) return;
                         facesToProcess = getUVIslandFaces(hit.object, startFaceIndex);
                     }
 
@@ -653,31 +751,49 @@ app.registerExtension({
                     const index = hit.object.geometry.index;
 
                     const faceDataArray = [];
+                    let hasChanges = false;
+                    
+                    const startFaceExists = maskState[layerId].faces.some(f => f.faceIndex === startFaceIndex && f.meshUuid === hit.object.uuid);
 
                     facesToProcess.forEach(fIdx => {
-                        if (maskState[layerId].faces.some(f => f.faceIndex === fIdx && f.meshUuid === hit.object.uuid)) return;
+                        const existingIndex = maskState[layerId].faces.findIndex(f => f.faceIndex === fIdx && f.meshUuid === hit.object.uuid);
 
-                        let a, b, c;
-                        if (index) {
-                            a = index.getX(fIdx * 3); b = index.getX(fIdx * 3 + 1); c = index.getX(fIdx * 3 + 2);
+                        if (startFaceExists) {
+                            if (existingIndex !== -1) {
+                                maskState[layerId].faces.splice(existingIndex, 1);
+                                hasChanges = true;
+                            }
                         } else {
-                            a = fIdx * 3; b = fIdx * 3 + 1; c = fIdx * 3 + 2;
+                            if (existingIndex === -1) {
+                                let a, b, c;
+                                if (index) {
+                                    a = index.getX(fIdx * 3); b = index.getX(fIdx * 3 + 1); c = index.getX(fIdx * 3 + 2);
+                                } else {
+                                    a = fIdx * 3; b = fIdx * 3 + 1; c = fIdx * 3 + 2;
+                                }
+    
+                                const uvA = { x: uvAttr.getX(a), y: uvAttr.getY(a) };
+                                const uvB = { x: uvAttr.getX(b), y: uvAttr.getY(b) };
+                                const uvC = { x: uvAttr.getX(c), y: uvAttr.getY(c) };
+    
+                                const vA = new THREE.Vector3(posAttr.getX(a), posAttr.getY(a), posAttr.getZ(a)).applyMatrix4(hit.object.matrixWorld);
+                                const vB = new THREE.Vector3(posAttr.getX(b), posAttr.getY(b), posAttr.getZ(b)).applyMatrix4(hit.object.matrixWorld);
+                                const vC = new THREE.Vector3(posAttr.getX(c), posAttr.getY(c), posAttr.getZ(c)).applyMatrix4(hit.object.matrixWorld);
+    
+                                faceDataArray.push({ meshUuid: hit.object.uuid, faceIndex: fIdx, uvA, uvB, uvC, vA, vB, vC });
+                                hasChanges = true;
+                            }
                         }
-
-                        const uvA = { x: uvAttr.getX(a), y: uvAttr.getY(a) };
-                        const uvB = { x: uvAttr.getX(b), y: uvAttr.getY(b) };
-                        const uvC = { x: uvAttr.getX(c), y: uvAttr.getY(c) };
-
-                        const vA = new THREE.Vector3(posAttr.getX(a), posAttr.getY(a), posAttr.getZ(a)).applyMatrix4(hit.object.matrixWorld);
-                        const vB = new THREE.Vector3(posAttr.getX(b), posAttr.getY(b), posAttr.getZ(b)).applyMatrix4(hit.object.matrixWorld);
-                        const vC = new THREE.Vector3(posAttr.getX(c), posAttr.getY(c), posAttr.getZ(c)).applyMatrix4(hit.object.matrixWorld);
-
-                        faceDataArray.push({ meshUuid: hit.object.uuid, faceIndex: fIdx, uvA, uvB, uvC, vA, vB, vC });
                     });
 
                     if (faceDataArray.length > 0) {
                         maskState[layerId].faces.push(...faceDataArray);
+                    }
+
+                    if (hasChanges) {
                         redrawMasks();
+                        currentHoverKey = 'none';
+                        handleHover(hit);
                     }
                 }
 
@@ -689,6 +805,11 @@ app.registerExtension({
                         const ctx = canvas.getContext('2d');
                         ctx.clearRect(0, 0, w, h);
 
+                        // Draw the base generated texture preview on the 2D canvas
+                        if (!isHidden && lastGeneratedImage) {
+                            ctx.drawImage(lastGeneratedImage, 0, 0, w, h);
+                        }
+
                         if (!isHidden && currentMesh) {
                             currentMesh.traverse((child) => {
                                 if (child.isMesh && child.geometry) {
@@ -697,6 +818,8 @@ app.registerExtension({
                             });
                         }
 
+                        const showMasks = typeof toggleMasks !== 'undefined' ? toggleMasks.checked : true;
+
                         Object.entries(maskState).forEach(([layerId, layer]) => {
                             const isActive = (layerId === activeLayerId);
                             
@@ -704,6 +827,7 @@ app.registerExtension({
                                 ctx.fillStyle = '#ffffff';
                                 ctx.strokeStyle = '#ffffff';
                             } else {
+                                if (!showMasks) return; // Skip drawing masks if toggle is off
                                 ctx.fillStyle = isActive ? 'rgba(76, 175, 80, 0.65)' : 'rgba(100, 150, 255, 0.5)';
                                 ctx.strokeStyle = isActive ? 'rgba(76, 175, 80, 0.65)' : 'rgba(100, 150, 255, 0.5)';
                             }
@@ -734,7 +858,8 @@ app.registerExtension({
 
                     let totalRecordedFaces = 0;
                     Object.values(maskState).forEach(m => { totalRecordedFaces += m.faces.length; });
-                    if (totalRecordedFaces > 0) {
+                    const showMasks = typeof toggleMasks !== 'undefined' ? toggleMasks.checked : true;
+                    if (totalRecordedFaces > 0 && showMasks) {
                         const vertices = new Float32Array(totalRecordedFaces * 9);
                         const colors = new Float32Array(totalRecordedFaces * 9);
                         let i = 0;
@@ -771,7 +896,8 @@ app.registerExtension({
                 let hoverInputRow = null;
 
                 function handleHover(hit) {
-                    if (!hit || !currentMesh) {
+                    // Strict defensive null-checking for the raycast intersection results
+                    if (!hit || !hit.object || !hit.object.userData || !currentMesh) {
                         if (currentHoverKey === 'none') return;
                         currentHoverKey = 'none';
                         if (hoverInputRow) {
@@ -802,6 +928,7 @@ app.registerExtension({
                     if (existingStateId) {
                         newHoverKey = `mask_${existingStateId}`;
                     } else if (isIslandMode) {
+                        if (!hit.object.userData.faceToIslandId) return;
                         newHoverKey = `island_${hit.object.userData.faceToIslandId[hitFaceIndex]}_${hit.object.uuid}`;
                     } else {
                         newHoverKey = `face_${hitFaceIndex}_${hit.object.uuid}`;
@@ -929,10 +1056,33 @@ app.registerExtension({
                         }
                     });
 
-                    const label = document.createElement('div');
-                    label.innerText = `Layer ${id}`;
+                    const label = document.createElement('input');
+                    label.type = 'text';
+                    label.value = `Layer ${id}`;
                     label.style.fontSize = '12px';
                     label.style.color = '#fff';
+                    label.style.background = 'transparent';
+                    label.style.border = '1px solid transparent';
+                    label.style.outline = 'none';
+                    label.style.width = '100px';
+                    label.style.cursor = 'text';
+                    label.title = 'Click to rename layer';
+                    
+                    label.addEventListener('mouseenter', () => {
+                        label.style.borderBottom = '1px solid #888';
+                    });
+                    label.addEventListener('mouseleave', () => {
+                        label.style.borderBottom = '1px solid transparent';
+                    });
+                    label.addEventListener('focus', () => {
+                        label.style.borderBottom = '1px solid #4CAF50';
+                    });
+                    label.addEventListener('blur', () => {
+                        label.style.borderBottom = '1px solid transparent';
+                    });
+                    label.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter') label.blur();
+                    });
 
                     leftHeader.appendChild(radioBtn);
                     leftHeader.appendChild(label);
@@ -1037,6 +1187,52 @@ app.registerExtension({
 
                 newLayerBtn.addEventListener('click', createNewLayer);
 
+                const originalOnConfigure = this.onConfigure;
+                this.onConfigure = function(info) {
+                    if (originalOnConfigure) originalOnConfigure.apply(this, arguments);
+                    
+                    if (this.painterDataWidget && this.painterDataWidget.value) {
+                        try {
+                            const data = JSON.parse(this.painterDataWidget.value);
+                            if (data.layers && data.layers.length > 0) {
+                                Object.keys(maskState).forEach(k => delete maskState[k]);
+                                promptStack.innerHTML = '';
+                                layerCount = 0;
+                                activeLayerId = null;
+
+                                data.layers.forEach(l => {
+                                    createNewLayer();
+                                    const layerId = activeLayerId;
+                                    const layerObj = maskState[layerId];
+
+                                    layerObj.prompt = l.prompt || '';
+                                    layerObj.inputRow.querySelector('.prompt-input').value = layerObj.prompt;
+                                    
+                                    const nameInput = layerObj.inputRow.querySelectorAll('input[type="text"]')[0];
+                                    if (l.name && nameInput) {
+                                        nameInput.value = l.name;
+                                    }
+
+                                    if (l.faces) {
+                                        layerObj.faces = l.faces;
+                                        layerObj.faces.forEach(f => {
+                                            if (f.vA) f.vA = new THREE.Vector3(f.vA.x, f.vA.y, f.vA.z);
+                                            if (f.vB) f.vB = new THREE.Vector3(f.vB.x, f.vB.y, f.vB.z);
+                                            if (f.vC) f.vC = new THREE.Vector3(f.vC.x, f.vC.y, f.vC.z);
+                                        });
+                                    }
+                                });
+
+                                if (data.cavity) {
+                                    currentBakedCavity = data.cavity;
+                                }
+
+                                redrawMasks();
+                            }
+                        } catch(e) {}
+                    }
+                };
+
                 // Animation loop
                 let animationId;
                 const animate = function () {
@@ -1047,12 +1243,13 @@ app.registerExtension({
                 animate();
 
                 // Clean up on remove
+                const parentOnRemoved = nodeType.prototype.onRemoved;
                 this.onRemoved = function () {
                     cancelAnimationFrame(animationId);
                     if (this.domContainer) {
                         this.domContainer.remove();
                     }
-                    if (onRemoved) onRemoved.apply(this, arguments);
+                    if (parentOnRemoved) parentOnRemoved.apply(this, arguments);
                 };
 
                 // Handle Resizing using ResizeObserver
@@ -1074,8 +1271,8 @@ app.registerExtension({
                 resizeObserver.observe(leftPane);
                 resizeObserver.observe(rightPane);
 
-                function getHitFaceIndex2D(clientX, clientY) {
-                    if (!currentGeometry) return -1;
+                function getHitFace2D(clientX, clientY) {
+                    if (!currentMesh) return null;
                     const rect = canvas2d.getBoundingClientRect();
                     const x = clientX - rect.left;
                     const y = clientY - rect.top;
@@ -1090,13 +1287,9 @@ app.registerExtension({
                     }
 
                     const px = x - offsetX, py = y - offsetY;
-                    if (px < 0 || px > renderWidth || py < 0 || py > renderHeight) return -1;
+                    if (px < 0 || px > renderWidth || py < 0 || py > renderHeight) return null;
 
                     const u = px / renderWidth; const v = 1.0 - (py / renderHeight);
-
-                    const uvAttr = currentGeometry.attributes.uv;
-                    const index = currentGeometry.index;
-                    const numFaces = index ? index.count / 3 : uvAttr.count / 3;
 
                     function pointInTriangle(px, py, ax, ay, bx, by, cx, cy) {
                         const v0x = cx - ax, v0y = cy - ay;
@@ -1113,26 +1306,36 @@ app.registerExtension({
                         return (baryU >= 0) && (baryV >= 0) && (baryU + baryV < 1);
                     }
 
-                    const uvArr = uvAttr.array;
-                    const idxArr = index ? index.array : null;
+                    let result = null;
+                    currentMesh.traverse((child) => {
+                        if (result) return;
+                        if (child.isMesh && child.geometry && child.geometry.attributes.uv) {
+                            const uvAttr = child.geometry.attributes.uv;
+                            const index = child.geometry.index;
+                            const numFaces = index ? index.count / 3 : uvAttr.count / 3;
+                            const uvArr = uvAttr.array;
+                            const idxArr = index ? index.array : null;
 
-                    for (let i = 0; i < numFaces; i++) {
-                        let a, b, c;
-                        if (idxArr) { a = idxArr[i * 3]; b = idxArr[i * 3 + 1]; c = idxArr[i * 3 + 2]; }
-                        else { a = i * 3; b = i * 3 + 1; c = i * 3 + 2; }
+                            for (let i = 0; i < numFaces; i++) {
+                                let a, b, c;
+                                if (idxArr) { a = idxArr[i * 3]; b = idxArr[i * 3 + 1]; c = idxArr[i * 3 + 2]; }
+                                else { a = i * 3; b = i * 3 + 1; c = i * 3 + 2; }
 
-                        if (pointInTriangle(u, v, uvArr[a * 2], uvArr[a * 2 + 1], uvArr[b * 2], uvArr[b * 2 + 1], uvArr[c * 2], uvArr[c * 2 + 1])) {
-                            return i;
+                                if (pointInTriangle(u, v, uvArr[a * 2], uvArr[a * 2 + 1], uvArr[b * 2], uvArr[b * 2 + 1], uvArr[c * 2], uvArr[c * 2 + 1])) {
+                                    result = { faceIndex: i, object: child };
+                                    break;
+                                }
+                            }
                         }
-                    }
-                    return -1;
+                    });
+                    return result;
                 }
 
                 // Add click and hover listeners to the UV canvas
                 canvas2d.addEventListener('click', (e) => {
-                    const hitFaceIndex = getHitFaceIndex2D(e.clientX, e.clientY);
-                    if (hitFaceIndex !== -1 && currentRenderMesh) {
-                        handleFaceClick({ faceIndex: hitFaceIndex, object: currentRenderMesh });
+                    const hit = getHitFace2D(e.clientX, e.clientY);
+                    if (hit) {
+                        handleFaceClick(hit);
                     }
                 });
 
@@ -1144,11 +1347,75 @@ app.registerExtension({
                     if (now - lastCanvasMoveTime < 32) return; // limit to ~30fps
                     lastCanvasMoveTime = now;
 
-                    const hitFaceIndex = getHitFaceIndex2D(e.clientX, e.clientY);
-                    handleHover(hitFaceIndex);
+                    const hit = getHitFace2D(e.clientX, e.clientY);
+                    handleHover(hit);
                 });
 
-                canvas2d.addEventListener('mouseleave', () => handleHover(-1));
+                canvas2d.addEventListener('mouseleave', () => handleHover(null));
+
+                // Texture Hot-Reload Listener
+                const onNodeExecuted = (e) => {
+                    const detail = e.detail;
+                    console.log("🟢 ComfyUI Node Executed:", detail);
+                    
+                    if (detail && detail.output && detail.output.images && detail.output.images.length > 0) {
+                        const img = detail.output.images[0];
+                        
+                        if (img.type !== 'output') return; // Ignore temp previews
+                        
+                        const query = new URLSearchParams({
+                            filename: img.filename,
+                            type: img.type,
+                            subfolder: img.subfolder || ''
+                        }).toString();
+                        
+                        const textureUrl = api.apiURL('/view?' + query);
+                        
+                        console.log("🖼️ Texture Found, loading:", textureUrl);
+                        
+                        // 2D Canvas Texture Preview
+                        const imgElement = new Image(); 
+                        imgElement.src = textureUrl; 
+                        imgElement.onload = () => { 
+                            lastGeneratedImage = imgElement; 
+                            redrawMasks(); 
+                        };
+
+                        if (currentMesh) {
+                            new THREE.TextureLoader().load(
+                                textureUrl, 
+                                (loadedTexture) => {
+                                    loadedTexture.colorSpace = THREE.SRGBColorSpace; // Ensure correct colors
+                                    currentMesh.traverse((child) => {
+                                        if (child.isMesh && child.material) {
+                                            // Destroy the old material completely
+                                            if (child.material) child.material.dispose();
+                                            // Create a fresh standard material with the loaded texture
+                                            child.material = new THREE.MeshBasicMaterial({
+                                                map: loadedTexture,
+                                                color: 0xffffff,
+                                                side: THREE.DoubleSide
+                                            });
+                                            child.material.needsUpdate = true;
+                                        }
+                                    });
+                                    console.log("✅ Texture mapped successfully!");
+                                },
+                                undefined,
+                                (err) => {
+                                    console.error("❌ TextureLoader Error: failed to load texture from", textureUrl, err);
+                                }
+                            );
+                        }
+                    }
+                };
+                api.addEventListener("executed", onNodeExecuted);
+                
+                const originalOnRemoved = this.onRemoved;
+                this.onRemoved = function() {
+                    api.removeEventListener("executed", onNodeExecuted);
+                    if (originalOnRemoved) originalOnRemoved.apply(this, arguments);
+                };
             };
 
             // Hook into drawing to track and align DOM element to node perfectly
